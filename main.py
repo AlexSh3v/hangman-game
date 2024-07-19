@@ -67,14 +67,13 @@ LETTER_CLICKED = ''
 
 
 def draw_letter_keyboard():
-    global LETTER_CLICKED
     for j, array in enumerate(letters_keyboard[LANGUAGE]):
         for i, letter in enumerate(array):
 
-            if letter in guessed and letter in word:
+            if letter in hangman.guessed and letter in hangman.word:
                 color = GREEN
                 main_font.set_bold(True)
-            elif letter in guessed and letter not in word:
+            elif letter in hangman.guessed and letter not in hangman.word:
                 color = RED
                 main_font.set_bold(True)
             else:
@@ -87,12 +86,112 @@ def draw_letter_keyboard():
             letter_y = LETTERS_Y + j * LETTERS_GAP
             screen.blit(text, (letter_x, letter_y))
 
+            mouse_x, mouse_y = MouseController.get_instance().get()
             if letter_x <= mouse_x <= letter_x+text.get_width() and letter_y <= mouse_y <= letter_y+text.get_height():
-                LETTER_CLICKED = letter
+                MouseController.get_instance().clicked_letter = letter
 
 
 texture_dir = pathlib.Path(__file__).parent / 'textures'
 AnchorValue = Literal['CENTER', 'NW', 'N', 'NE', 'S', 'W']
+
+
+class HangmanGame:
+    __instance = None
+    __instance_count = 0
+
+    def __init__(self):
+        if self.__class__.__instance is not None:
+            raise ValueError('this is Singleton Class!')
+
+        self.is_lost = False
+        self.is_won = False
+        self.running = True
+        self.word = ''
+        self.blanks = ['_'] * len(self.word)
+        self.guessed = set()
+        self.scoring_system = ScoringSystem()
+
+        self.__class__.__instance_count += 1
+        if self.__class__.__instance_count > 1:
+            raise ValueError('this is Singleton Class!')
+
+    @classmethod
+    def get_instance(cls):
+        if cls.__instance is None:
+            cls.__instance = cls()
+        return cls.__instance
+
+    @property
+    def is_game_over(self) -> bool:
+        return self.is_lost or self.is_won
+    
+    def trigger_player_won(self):
+        if self.is_won:
+            return
+        win_sound.play()
+        self.scoring_system.streak += 1
+        self.scoring_system.perk_freeze += 1
+        if self.scoring_system.streak % 3 == 0:
+            self.scoring_system.perk_hint += 1
+        if is_chance(10):
+            self.scoring_system.perk_nuka_bomb += 1
+        self.is_won = True
+        
+    def trigger_lost(self):
+        if self.is_lost:
+            return
+        head_cripple_sound.play()
+        self.scoring_system.streak = 0
+        self.is_lost = True
+    
+    def init_game(self):
+        if self.is_lost:
+            self.scoring_system.update_lost()
+        elif self.is_won:
+            self.scoring_system.update_won()
+        self.is_lost = False
+        self.is_won = False
+        self.running = True
+        MouseController.get_instance().pull_offscreen()
+        self.setup_guessing_word()
+
+    def try_to_guess(self, letter: str):
+        if letter in self.word:
+            self.fill_blank(letter)
+            right_letter_sound.play()
+        else:
+            self.guessed.add(letter)
+            wrong_letter_sound.play()
+            if self.scoring_system.perk_nuka_bomb_active:
+                self.scoring_system.skip_count += 1
+            elif hangman.scoring_system.perk_freeze_active:
+                hangman.scoring_system.skip_count += 1
+                hangman.scoring_system.perk_freeze_active = False
+
+    def fill_blank(self, letter: str):
+        for i in range(len(self.word)):
+            if self.word[i] == letter:
+                self.blanks[i] = letter
+                self.guessed.add(letter)
+
+    @property
+    def wrong_number_guessed(self):
+        return len(set(self.word) - set(self.guessed))
+   
+    def is_guessed(self):
+        return self.wrong_number_guessed == 0
+
+    def setup_guessing_word(self):
+        target_index = secrets.randbelow(words_total[LANGUAGE] + 1)
+        with words_path[LANGUAGE].open() as txt:
+            for i, line in enumerate(txt.readlines()):
+                if i != target_index:
+                    continue
+                self.word = line.strip()
+                break
+        self.guessed.clear()
+        self.blanks.clear()
+        self.blanks.extend(['_'] * len(self.word))
 
 
 @dataclasses.dataclass
@@ -127,6 +226,7 @@ class Object:
     def is_clicked(self) -> bool:
         x, y = self.pos
         w, h = self.texture.get_size()
+        mouse_x, mouse_y = MouseController.get_instance().get()
         return x <= mouse_x <= x+w and y <= mouse_y <= y+h
 
     def draw(self, dx=0, dy=0, color=None) -> tuple[int, int, int, int]:
@@ -211,23 +311,10 @@ class Objects:
         (WIDTH * 0.20, HEIGHT * 0.45), 'W'
     ).scale(0.5, 0.5)
 
+
 # Set up the display
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Hangman")
-
-
-def setup_guessing_word():
-    global word
-    target_index = secrets.randbelow(words_total[LANGUAGE] + 1)
-    with words_path[LANGUAGE].open() as txt:
-        for i, line in enumerate(txt.readlines()):
-            if i != target_index:
-                continue
-            word = line.strip()
-            break
-    guessed.clear()
-    blanks.clear()
-    blanks.extend(['_'] * len(word))
 
 
 @dataclasses.dataclass
@@ -265,7 +352,6 @@ class ScoringSystem:
         ScoringSystem.draw_icon(Objects.perk_nuka_bomb, self.perk_nuka_bomb)
 
     def update(self):
-        global mouse_x
 
         is_clicked = False
 
@@ -292,10 +378,9 @@ class ScoringSystem:
             is_clicked = True
 
         if is_clicked:
-            mouse_x = -100
+            MouseController.get_instance().pull_offscreen()
 
     def update_won(self):
-        print('WON!!!')
         self.longest_streak = max(self.streak, self.longest_streak)
         self.perk_freeze_active = False
         self.perk_hint_active = False
@@ -304,13 +389,44 @@ class ScoringSystem:
         self.perk_nukes_array.clear()
 
     def update_lost(self):
-        print('LOST!!!')
         self.streak = 0
         self.perk_freeze_active = False
         self.perk_hint_active = False
         self.perk_nuka_bomb_active = False
         self.skip_count = 0
         self.perk_nukes_array.clear()
+        
+
+class MouseController:
+    __instance = None
+    __instance_count = 0
+
+    def __init__(self):
+        if self.__class__.__instance is not None:
+            raise ValueError('this is Singleton Class!')
+        self.mouse_x: int | float = -1
+        self.mouse_y: int | float = -1
+        self.clicked_letter: str = ''
+        self.__class__.__instance_count += 1
+        if self.__class__.__instance_count > 1:
+            raise ValueError('this is Singleton Class!')
+
+    @classmethod
+    def get_instance(cls):
+        if cls.__instance is None:
+            cls.__instance = cls()
+        return cls.__instance
+
+    def set_at(self, x: int | float, y: int | float):
+        self.mouse_x = x
+        self.mouse_y = y
+        
+    def get(self) -> tuple[int | float, int | float]:
+        return self.mouse_x, self.mouse_y
+    
+    def pull_offscreen(self):
+        self.mouse_x = -999
+        self.mouse_y = -999
 
 
 def get_letters_in_radius(arr, x, y, radius):
@@ -332,147 +448,98 @@ def is_chance(percent: int) -> bool:
     return (secrets.randbelow(100) + 1) <= percent
 
 
-word = ''
-blanks = []
-guessed = set()
-setup_guessing_word()
+hangman = HangmanGame.get_instance()
+hangman.init_game()
+mouse_controller = MouseController.get_instance()
 
-# Game loop
-is_game_over = False
-is_won = False
-running = True
-mouse_x = 0
-mouse_y = 0
-scoring = ScoringSystem()
-while running:
+while hangman.running:
 
-    scoring.update()
+    hangman.scoring_system.update()
 
-    if scoring.perk_hint_active:
+    if hangman.scoring_system.perk_hint_active:
         letter = None
-        for let, _ in collections.Counter(word).most_common():
-            if let not in blanks:
+        for let, _ in collections.Counter(hangman.word).most_common():
+            if let not in hangman.blanks:
                 letter = let
                 break
-        for i in range(len(word)):
-            if word[i] == letter:
-                blanks[i] = letter
-                guessed.add(letter)
+        hangman.fill_blank(letter)
         right_letter_sound.play()
-        scoring.perk_hint_active = False
+        hangman.scoring_system.perk_hint_active = False
 
-    if len(set(word) - set(guessed)) == 0:
-        if not is_won:
-            win_sound.play()
-            scoring.streak += 1
-            scoring.perk_freeze += 1
-            if scoring.streak % 3 == 0:
-                scoring.perk_hint += 1
-            if is_chance(10):
-                scoring.perk_nuka_bomb += 1
-        is_won = True
+    if hangman.is_guessed():
+        hangman.trigger_player_won()
 
-    # Handle events
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
-            running = False
-        elif event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
-            if is_game_over or is_won:
-                setup_guessing_word()
-                if is_game_over:
-                    scoring.update_lost()
-                elif is_won:
-                    scoring.update_won()
-                is_game_over = False
-                is_won = False
-        elif event.type == pygame.MOUSEBUTTONDOWN and not is_game_over and not is_won:
-            mouse_x, mouse_y = event.pos
+            hangman.running = False
+        elif event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and hangman.is_game_over:
+            hangman.init_game()
+        elif event.type == pygame.MOUSEBUTTONDOWN and not hangman.is_game_over:
+            print(mouse_controller.get())
+            mouse_controller.set_at(*event.pos)
+            print(event.pos)
 
-    if LETTER_CLICKED.isalpha() and not is_game_over and not is_won:
+    clicked_letter = mouse_controller.clicked_letter
+    if clicked_letter.isalpha() and not hangman.is_game_over:
+        print(clicked_letter)
 
-        if scoring.perk_nuka_bomb_active:
-            result = get_letter_coordinates(letters_keyboard[LANGUAGE], LETTER_CLICKED)
+        if hangman.scoring_system.perk_nuka_bomb_active:
+            result = get_letter_coordinates(letters_keyboard[LANGUAGE], clicked_letter)
             if result is None:
-                raise ValueError(f'HOW LETTER {LETTER_CLICKED!r} GOT INTO {letters_keyboard[LANGUAGE]} ???')
+                raise ValueError(f'HOW LETTER {clicked_letter!r} GOT INTO {letters_keyboard[LANGUAGE]} ???')
             i, j = result
             explosion_sound.play()
             for letter in get_letters_in_radius(letters_keyboard[LANGUAGE], i, j, 1):
-                if letter in word:
-                    for i in range(len(word)):
-                        if word[i] == letter:
-                            blanks[i] = letter
-                            guessed.add(letter)
-                    right_letter_sound.play()
-                else:
-                    guessed.add(letter)
-                    wrong_letter_sound.play()
-                    scoring.skip_count += 1
-            scoring.perk_nuka_bomb_active = False
-            scoring.perk_nukes_array.append(
+                hangman.try_to_guess(letter)
+            hangman.scoring_system.perk_nuka_bomb_active = False
+            hangman.scoring_system.perk_nukes_array.append(
                 Object(
                     Objects.explosion_surface,
-                    (mouse_x, mouse_y), 'CENTER',
+                    mouse_controller.get(), 'CENTER',
                 )
             )
         else:
-            # Check if the letter is in the word
-            if LETTER_CLICKED in word:
-                # Fill in the correct blanks
-                for i in range(len(word)):
-                    if word[i] == LETTER_CLICKED:
-                        blanks[i] = LETTER_CLICKED
-                        guessed.add(LETTER_CLICKED)
-                right_letter_sound.play()
-            else:
-                guessed.add(LETTER_CLICKED)
-                wrong_letter_sound.play()
-                if scoring.perk_freeze_active:
-                    scoring.skip_count += 1
-                    scoring.perk_freeze_active = False
+            hangman.try_to_guess(clicked_letter)
 
-        LETTER_CLICKED = ''
-        mouse_x, mouse_y = 0, 0
+        mouse_controller.clicked_letter = ''
+        mouse_controller.pull_offscreen()
 
     # Draw everything
     screen.fill(WHITE)
 
-    scoring.draw()
+    hangman.scoring_system.draw()
 
     # FIGURE
-    wrong_length = len(guessed - set(word))
-    print(word, wrong_length - scoring.skip_count, len(Objects.hangman_figure))
+    wrong_number_guessed = len(hangman.guessed - set(hangman.word))
     for i in range(len(Objects.hangman_figure)):
-        if wrong_length-scoring.skip_count >= len(Objects.hangman_figure):
-            if not is_game_over:
-                head_cripple_sound.play()
-                scoring.streak = 0
-            is_game_over = True
+        if wrong_number_guessed-hangman.scoring_system.skip_count >= len(Objects.hangman_figure):
+            hangman.trigger_lost()
         obj = Objects.hangman_figure[i]
-        if i >= wrong_length-scoring.skip_count:
+        if i >= wrong_number_guessed-hangman.scoring_system.skip_count:
             obj.texture.set_alpha(40)
         else:
             obj.texture.set_alpha(255)
         obj.draw(*Objects.hangman_figure_delta)
 
-    if is_won:
+    if hangman.is_won:
         main_font.set_bold(True)
-        text = main_font.render(' '.join(word), True, GREEN)
-    elif is_game_over:
+        text = main_font.render(' '.join(hangman.word), True, GREEN)
+    elif hangman.is_lost:
         main_font.set_bold(True)
-        text = main_font.render(' '.join(word), True, RED)
+        text = main_font.render(' '.join(hangman.word), True, RED)
     else:
         main_font.set_bold(False)
-        text = main_font.render(' '.join(blanks), True, BLACK)
+        text = main_font.render(' '.join(hangman.blanks), True, BLACK)
     screen.blit(text, (WIDTH/2 - text.get_width()/2, HEIGHT*8/10))
 
     draw_letter_keyboard()
 
-    if scoring.perk_freeze_active:
+    if hangman.scoring_system.perk_freeze_active:
         Objects.freeze_spiral.draw()
 
-    if scoring.perk_nuka_bomb_active:
+    if hangman.scoring_system.perk_nuka_bomb_active:
         Objects.nuke_warning.draw()
-    for nuke in scoring.perk_nukes_array:
+    for nuke in hangman.scoring_system.perk_nukes_array:
         nuke.draw()
 
     # ::DEBUG-DRAWER::
