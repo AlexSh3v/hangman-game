@@ -14,7 +14,7 @@ project_dir = pathlib.Path(__file__).parent
 
 words_path = {
     'en': project_dir / 'data' / 'en.txt',
-    'ru': project_dir / 'data' / 'ru_nouns.txt',  # https://github.com/codemurt/russian-words?tab=readme-ov-file
+    'ru': project_dir / 'data' / 'ru_nouns.txt',
 }
 words_total = {
     'en': 370_104,
@@ -451,6 +451,7 @@ def is_chance(percent: int) -> bool:
 hangman = HangmanGame.get_instance()
 hangman.init_game()
 mouse_controller = MouseController.get_instance()
+is_event_happend = False
 
 while hangman.running:
 
