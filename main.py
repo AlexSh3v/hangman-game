@@ -1,3 +1,4 @@
+import collections
 import dataclasses
 import pathlib
 import secrets
@@ -13,11 +14,11 @@ project_dir = pathlib.Path(__file__).parent
 
 words_path = {
     'en': project_dir / 'data' / 'en.txt',
-    'ru': project_dir / 'data' / 'ru.txt',
+    'ru': project_dir / 'data' / 'ru_nouns.txt',  # https://github.com/codemurt/russian-words?tab=readme-ov-file
 }
 words_total = {
     'en': 370_104,
-    'ru': 137_000,
+    'ru': 21_320,
 }
 letters_keyboard = {
     'en': [
@@ -38,13 +39,23 @@ letters_keyboard = {
 }
 LANGUAGE = 'ru'
 
-comic_sans_font = pygame.font.Font(project_dir / 'fonts' / 'comic-sans.ttf', 42)
+# Load the sound effect
+win_sound = pygame.mixer.Sound(project_dir / 'audio' / 'xp_up.mp3')
+hint_sound = pygame.mixer.Sound(project_dir / 'audio' / 'hint.wav')
+explosion_sound = pygame.mixer.Sound(project_dir / 'audio' / 'explosion.mp3')
+head_cripple_sound = pygame.mixer.Sound(project_dir / 'audio' / 'head_cripple.mp3')
+right_letter_sound = pygame.mixer.Sound(project_dir / 'audio' / 'right_letter.mp3')
+wrong_letter_sound = pygame.mixer.Sound(project_dir / 'audio' / 'wrong_letter.mp3')
+
+main_font = pygame.font.Font(project_dir / 'fonts' / 'comic-sans.ttf', 42)
+ui_font = pygame.font.Font(project_dir / 'fonts' / 'comic-sans.ttf', 32)
 
 WIDTH, HEIGHT = 960, 540
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 RED = (255, 0, 0)
 GREEN = (0, 200, 0)
+YELLLOW = (215, 240, 0)
 
 LETTERS_X = WIDTH - 400
 LETTERS_Y = HEIGHT/5 - 50
@@ -62,14 +73,14 @@ def draw_letter_keyboard():
 
             if letter in guessed and letter in word:
                 color = GREEN
-                comic_sans_font.set_bold(True)
+                main_font.set_bold(True)
             elif letter in guessed and letter not in word:
                 color = RED
-                comic_sans_font.set_bold(True)
+                main_font.set_bold(True)
             else:
                 color = (0, 0, 0)
-                comic_sans_font.set_bold(False)
-            text = comic_sans_font.render(letter.upper(), True, color)
+                main_font.set_bold(False)
+            text = main_font.render(letter.upper(), True, color)
             w, h = text.get_size()
             extra_w = max(LETTERS_CELL_WIDTH - w, 0)
             letter_x = LETTERS_X + extra_w + LETTERS_GAP * i
@@ -81,7 +92,7 @@ def draw_letter_keyboard():
 
 
 texture_dir = pathlib.Path(__file__).parent / 'textures'
-AnchorValue = Literal['NW', 'N', 'NE', 'S', 'W']
+AnchorValue = Literal['CENTER', 'NW', 'N', 'NE', 'S', 'W']
 
 
 @dataclasses.dataclass
@@ -90,9 +101,40 @@ class Object:
     pos: tuple[int, int]
     anchor: AnchorValue
 
-    def draw(self, dx=0, dy=0):
+    def __post_init__(self):
+        self.__scaling_factors = (1, 1)
+
+    def fill(self, color):
+        w, h = self.texture.get_size()
+        r, g, b, *a = color
+        alpha = None
+        if a:
+            alpha = a[0]
+        for x in range(w):
+            for y in range(h):
+                a = self.texture.get_at((x, y))[3]
+                if a > 0 and alpha is not None:
+                    a = alpha
+                self.texture.set_at((x, y), pygame.Color(r, g, b, a))
+
+    def scale(self, dw: float, dh: float):
+        w, h = self.texture.get_size()
+        return Object(
+            pygame.transform.scale(self.texture, (w*dw, h*dh)),
+            self.pos, self.anchor,
+        )
+
+    def is_clicked(self) -> bool:
         x, y = self.pos
         w, h = self.texture.get_size()
+        return x <= mouse_x <= x+w and y <= mouse_y <= y+h
+
+    def draw(self, dx=0, dy=0, color=None) -> tuple[int, int, int, int]:
+        if color is None:
+            color = BLACK
+        x, y = self.pos
+        w, h = self.texture.get_size()
+        # self.fill(color)
         if self.anchor == 'N':
             dest = (x-w/2, y)
         elif self.anchor == 'NW':
@@ -103,13 +145,16 @@ class Object:
             dest = (x, y-h/2)
         elif self.anchor == 'NE':
             dest = (x-w, y)
+        elif self.anchor == 'CENTER':
+            dest = (x-w/2, y-h/2)
         else:
             raise ValueError(f'unknown anchor value {self.anchor!r}')
         dest = (dest[0] + dx, dest[1] + dy)
         screen.blit(self.texture, dest)
+        return x, y, w, h
 
 
-class Texture:
+class Objects:
     wood_1 = pygame.image.load(texture_dir / 'wood-1.png')
     wood_2 = pygame.image.load(texture_dir / 'wood-2.png')
     wood_3 = pygame.image.load(texture_dir / 'wood-3.png')
@@ -137,6 +182,34 @@ class Texture:
         Object(hangman_6, (425, 352), 'NE'),
     ]
 
+    streak_icon = Object(
+        pygame.image.load(texture_dir / 'streak.png'),
+        (0, 0), 'NW'
+    ).scale(0.2, 0.2)
+
+    _start_y = LETTERS_Y+30
+    perk_freeze = Object(
+        pygame.image.load(texture_dir / 'freeze_spiral_black.png'),
+        (10, _start_y), 'NW'
+    ).scale(0.10, 0.10)
+    perk_hint = Object(
+        pygame.image.load(texture_dir / 'perk_hint.png'),
+        (0, _start_y*1.70), 'NW'
+    ).scale(0.3, 0.3)
+    perk_nuka_bomb = Object(
+        pygame.image.load(texture_dir / 'perk_nuka_bomb.png'),
+        (10, _start_y*2.60), 'NW'
+    ).scale(0.2, 0.2)
+
+    freeze_spiral = Object(
+        pygame.image.load(texture_dir / 'freeze_spiral_blue.png'),
+        (WIDTH * 0.20, HEIGHT * 0.45), 'W'
+    ).scale(0.5, 0.5)
+    explosion_surface = pygame.image.load(texture_dir / 'explosion.png')
+    nuke_warning = Object(
+        pygame.image.load(texture_dir / 'nuke-warning.png'),
+        (WIDTH * 0.20, HEIGHT * 0.45), 'W'
+    ).scale(0.5, 0.5)
 
 # Set up the display
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -157,6 +230,108 @@ def setup_guessing_word():
     blanks.extend(['_'] * len(word))
 
 
+@dataclasses.dataclass
+class ScoringSystem:
+    streak: int = 0
+    longest_streak: int = 0
+
+    perk_freeze: int = 0
+    perk_hint: int = 0
+    perk_nuka_bomb: int = 0
+
+    perk_freeze_active: bool = False
+    perk_hint_active: bool = False
+    perk_nuka_bomb_active: bool = False
+
+    skip_count: int = 0
+    perk_nukes_array: list[Object] = dataclasses.field(default_factory=list)
+
+    @staticmethod
+    def draw_icon(obj: Object, number: int, color=None):
+        if color is None:
+            color = BLACK if number > 0 else RED
+        x, y, w, h = obj.draw(color=color)
+        dw = w * 0.75
+        dh = h * 0.50
+        ui_font.set_italic(True)
+        text = ui_font.render(str(number), True, color)
+        screen.blit(text, (x+dw, y+dh))
+        ui_font.set_italic(False)
+
+    def draw(self):
+        ScoringSystem.draw_icon(Objects.streak_icon, self.streak, YELLLOW)
+        ScoringSystem.draw_icon(Objects.perk_freeze, self.perk_freeze)
+        ScoringSystem.draw_icon(Objects.perk_hint, self.perk_hint)
+        ScoringSystem.draw_icon(Objects.perk_nuka_bomb, self.perk_nuka_bomb)
+
+    def update(self):
+        global mouse_x
+
+        is_clicked = False
+
+        if Objects.streak_icon.is_clicked() and self.streak >= 10:
+            self.streak -= 10
+            self.perk_nuka_bomb += 1
+            win_sound.play()
+            is_clicked = True
+
+        if Objects.perk_freeze.is_clicked() and self.perk_freeze > 0 and not self.perk_freeze_active:
+            self.perk_freeze_active = True
+            self.perk_freeze -= 1
+            hint_sound.play()
+            is_clicked = True
+
+        if Objects.perk_hint.is_clicked() and self.perk_hint > 0 and not self.perk_hint_active:
+            self.perk_hint_active = True
+            self.perk_hint -= 1
+            is_clicked = True
+
+        if Objects.perk_nuka_bomb.is_clicked() and self.perk_nuka_bomb > 0 and not self.perk_nuka_bomb_active:
+            self.perk_nuka_bomb_active = True
+            self.perk_nuka_bomb -= 1
+            is_clicked = True
+
+        if is_clicked:
+            mouse_x = -100
+
+    def update_won(self):
+        print('WON!!!')
+        self.longest_streak = max(self.streak, self.longest_streak)
+        self.perk_freeze_active = False
+        self.perk_hint_active = False
+        self.perk_nuka_bomb_active = False
+        self.skip_count = 0
+        self.perk_nukes_array.clear()
+
+    def update_lost(self):
+        print('LOST!!!')
+        self.streak = 0
+        self.perk_freeze_active = False
+        self.perk_hint_active = False
+        self.perk_nuka_bomb_active = False
+        self.skip_count = 0
+        self.perk_nukes_array.clear()
+
+
+def get_letters_in_radius(arr, x, y, radius):
+    for i in range(x - radius, x + radius + 1):
+        for j in range(y - radius, y + radius + 1):
+            if 0 <= i < len(arr) and 0 <= j < len(arr[i]):
+                yield arr[i][j]
+
+
+def get_letter_coordinates(arr, letter):
+    for i, row in enumerate(arr):
+        for j, elem in enumerate(row):
+            if elem == letter:
+                return i, j
+    return None
+
+
+def is_chance(percent: int) -> bool:
+    return (secrets.randbelow(100) + 1) <= percent
+
+
 word = ''
 blanks = []
 guessed = set()
@@ -168,77 +343,137 @@ is_won = False
 running = True
 mouse_x = 0
 mouse_y = 0
+scoring = ScoringSystem()
 while running:
-    print(f'MOUSE: ({mouse_x}, {mouse_y})')
+
+    scoring.update()
+
+    if scoring.perk_hint_active:
+        letter = None
+        for let, _ in collections.Counter(word).most_common():
+            if let not in blanks:
+                letter = let
+                break
+        for i in range(len(word)):
+            if word[i] == letter:
+                blanks[i] = letter
+                guessed.add(letter)
+        right_letter_sound.play()
+        scoring.perk_hint_active = False
+
     if len(set(word) - set(guessed)) == 0:
+        if not is_won:
+            win_sound.play()
+            scoring.streak += 1
+            scoring.perk_freeze += 1
+            if scoring.streak % 3 == 0:
+                scoring.perk_hint += 1
+            if is_chance(10):
+                scoring.perk_nuka_bomb += 1
         is_won = True
 
     # Handle events
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
-        elif event.type == pygame.KEYDOWN and (97 <= event.key <= 122):
-            if is_game_over or is_won:
-                continue
-            letter = chr(event.key)
-
-            # Check if the letter is in the word
-            if letter in word:
-                # Fill in the correct blanks
-                for i in range(len(word)):
-                    if word[i] == letter:
-                        blanks[i] = letter
-                        guessed.add(letter)
-            else:
-                guessed.add(letter)
         elif event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
             if is_game_over or is_won:
                 setup_guessing_word()
+                if is_game_over:
+                    scoring.update_lost()
+                elif is_won:
+                    scoring.update_won()
                 is_game_over = False
                 is_won = False
         elif event.type == pygame.MOUSEBUTTONDOWN and not is_game_over and not is_won:
             mouse_x, mouse_y = event.pos
 
     if LETTER_CLICKED.isalpha() and not is_game_over and not is_won:
-        # Check if the letter is in the word
-        if LETTER_CLICKED in word:
-            # Fill in the correct blanks
-            for i in range(len(word)):
-                if word[i] == LETTER_CLICKED:
-                    blanks[i] = LETTER_CLICKED
-                    guessed.add(LETTER_CLICKED)
+
+        if scoring.perk_nuka_bomb_active:
+            result = get_letter_coordinates(letters_keyboard[LANGUAGE], LETTER_CLICKED)
+            if result is None:
+                raise ValueError(f'HOW LETTER {LETTER_CLICKED!r} GOT INTO {letters_keyboard[LANGUAGE]} ???')
+            i, j = result
+            explosion_sound.play()
+            for letter in get_letters_in_radius(letters_keyboard[LANGUAGE], i, j, 1):
+                if letter in word:
+                    for i in range(len(word)):
+                        if word[i] == letter:
+                            blanks[i] = letter
+                            guessed.add(letter)
+                    right_letter_sound.play()
+                else:
+                    guessed.add(letter)
+                    wrong_letter_sound.play()
+                    scoring.skip_count += 1
+            scoring.perk_nuka_bomb_active = False
+            scoring.perk_nukes_array.append(
+                Object(
+                    Objects.explosion_surface,
+                    (mouse_x, mouse_y), 'CENTER',
+                )
+            )
         else:
-            guessed.add(LETTER_CLICKED)
+            # Check if the letter is in the word
+            if LETTER_CLICKED in word:
+                # Fill in the correct blanks
+                for i in range(len(word)):
+                    if word[i] == LETTER_CLICKED:
+                        blanks[i] = LETTER_CLICKED
+                        guessed.add(LETTER_CLICKED)
+                right_letter_sound.play()
+            else:
+                guessed.add(LETTER_CLICKED)
+                wrong_letter_sound.play()
+                if scoring.perk_freeze_active:
+                    scoring.skip_count += 1
+                    scoring.perk_freeze_active = False
+
         LETTER_CLICKED = ''
         mouse_x, mouse_y = 0, 0
 
     # Draw everything
     screen.fill(WHITE)
 
+    scoring.draw()
+
     # FIGURE
     wrong_length = len(guessed - set(word))
-    for i in range(len(Texture.hangman_figure)):
-        if wrong_length >= len(Texture.hangman_figure):
+    print(word, wrong_length - scoring.skip_count, len(Objects.hangman_figure))
+    for i in range(len(Objects.hangman_figure)):
+        if wrong_length-scoring.skip_count >= len(Objects.hangman_figure):
+            if not is_game_over:
+                head_cripple_sound.play()
+                scoring.streak = 0
             is_game_over = True
-        obj = Texture.hangman_figure[i]
-        if i >= wrong_length:
+        obj = Objects.hangman_figure[i]
+        if i >= wrong_length-scoring.skip_count:
             obj.texture.set_alpha(40)
         else:
             obj.texture.set_alpha(255)
-        obj.draw(*Texture.hangman_figure_delta)
+        obj.draw(*Objects.hangman_figure_delta)
 
     if is_won:
-        comic_sans_font.set_bold(True)
-        text = comic_sans_font.render(' '.join(word), True, GREEN)
+        main_font.set_bold(True)
+        text = main_font.render(' '.join(word), True, GREEN)
     elif is_game_over:
-        comic_sans_font.set_bold(True)
-        text = comic_sans_font.render(' '.join(word), True, RED)
+        main_font.set_bold(True)
+        text = main_font.render(' '.join(word), True, RED)
     else:
-        comic_sans_font.set_bold(False)
-        text = comic_sans_font.render(' '.join(blanks), True, BLACK)
+        main_font.set_bold(False)
+        text = main_font.render(' '.join(blanks), True, BLACK)
     screen.blit(text, (WIDTH/2 - text.get_width()/2, HEIGHT*8/10))
 
     draw_letter_keyboard()
+
+    if scoring.perk_freeze_active:
+        Objects.freeze_spiral.draw()
+
+    if scoring.perk_nuka_bomb_active:
+        Objects.nuke_warning.draw()
+    for nuke in scoring.perk_nukes_array:
+        nuke.draw()
 
     # ::DEBUG-DRAWER::
     # POS = (425, 352)
